@@ -48,7 +48,7 @@ Pass `--anchor CHAIN:RESNUM [...]` to restrict the output to a local surface pat
 
 Instead of Euclidean distance (which would select residues through the protein interior), the tool builds a **surface graph** — nodes are Exposed residues, edges connect Cα atoms within `--graph-step` Å — and runs **Dijkstra** from the anchor(s). Only exposed residues within `--surface-radius` Å of *surface-path* distance are selected, along with their Supporting neighbours.
 
-This is useful when you already know a functional site (e.g. a binding interface residue) and want to extract the surrounding surface patch.
+**Cross-gap solvent edges** (`--cross-gap`, default 20 Å): allows the walk to jump across solvent-filled cavities and clefts — useful for curved, concave, or hollow surfaces where the around-the-surface path is much longer than the straight-line distance. Each candidate long edge is validated by sampling the Cα–Cα segment and rejecting it if any sample point is within `--probe-radius` Å of a protein atom (i.e., it passes through the interior). Set `--cross-gap` equal to `--graph-step` to disable.
 
 ### Options
 
@@ -60,6 +60,8 @@ This is useful when you already know a functional site (e.g. a binding interface
 | `--anchor` | *(off)* | Activate surface-walk mode: one or more `CHAIN:RESNUM` anchors, e.g. `--anchor A:42 B:10` |
 | `--surface-radius` | `25.0` | (Anchor mode) Max surface-path distance (Å) from anchor(s) |
 | `--graph-step` | `10.0` | (Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge |
+| `--cross-gap` | `20.0` | (Anchor mode) Max Cα–Cα for solvent-crossing edges; set equal to `--graph-step` to disable |
+| `--probe-radius` | `2.5` | (Anchor mode) Min clearance (Å) from any protein atom for a cross-gap edge |
 
 ## Visualisation
 

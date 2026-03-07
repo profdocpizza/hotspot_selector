@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from Bio.PDB import PDBParser, MMCIFParser, PDBIO, Select
+from Bio.PDB import PDBParser, MMCIFParser, PDBIO, Select, NeighborSearch
 from Bio.PDB.SASA import ShrakeRupley
 
 # Maximum accessible surface area (Å²) per residue type in extended Gly-X-Gly context
@@ -175,15 +175,75 @@ def fill_supporting_gaps(structure, classification: dict, gap_aa: int = 3) -> di
     return updated
 
 
-def build_surface_graph(exposed_residues: list, graph_step: float) -> dict:
-    """
-    Build an adjacency graph over Exposed residues using Cα–Cα distances.
+def build_atom_kd_tree(structure) -> NeighborSearch:
+    """KD-tree over all protein heavy atoms (non-hydrogen ATOM records)."""
+    atoms = [
+        atom for model in structure
+        for chain in model
+        for res in chain
+        if res.id[0] == " "
+        for atom in res.get_atoms()
+        if atom.element and atom.element.strip().upper() != "H"
+    ]
+    return NeighborSearch(atoms)
 
-    Nodes  : residue full_id
-    Edges  : pair of exposed residues whose Cα–Cα distance ≤ graph_step
-    Returns: dict { full_id -> list of (neighbour_full_id, distance) }
+
+def segment_clears_protein(
+    p1: np.ndarray,
+    p2: np.ndarray,
+    ns: NeighborSearch,
+    probe_radius: float,
+    sample_step: float = 1.0,
+) -> bool:
     """
-    # Collect Cα positions; fall back to first atom if no Cα present
+    Return True if the line segment p1→p2 does not pass through the protein.
+
+    Samples the segment at `sample_step` Å intervals, skipping the first and
+    last 10% to avoid false positives from the endpoint residues' own atoms.
+    A sample point is considered 'inside protein' if any atom is within
+    `probe_radius` Å.
+    """
+    vec = p2 - p1
+    length = float(np.linalg.norm(vec))
+    if length < 1e-6:
+        return True
+
+    n_steps = max(2, int(length / sample_step))
+    for k in range(n_steps + 1):
+        t = k / n_steps
+        # Skip endpoints (first/last 10%) to avoid endpoint-atom artifacts
+        if t < 0.1 or t > 0.9:
+            continue
+        point = p1 + t * vec
+        if ns.search(point.tolist(), probe_radius, level="A"):
+            return False  # segment passes through protein
+    return True
+
+
+def build_surface_graph(
+    exposed_residues: list,
+    graph_step: float,
+    cross_gap_step: float = 0.0,
+    ns: NeighborSearch = None,
+    probe_radius: float = 2.5,
+) -> dict:
+    """
+    Build an adjacency graph over Exposed residues.
+
+    Short edges (Cα–Cα ≤ graph_step):
+        Added unconditionally — surface-adjacent residues.
+
+    Cross-gap edges (graph_step < Cα–Cα ≤ cross_gap_step):
+        Added only if the straight-line segment between the Cα atoms does not
+        pass through any protein atom (KD-tree line test).  These allow the
+        walk to jump across solvent-filled cavities or clefts.
+
+    Args:
+        cross_gap_step: maximum Cα–Cα distance for cross-gap edges.
+                        Set to 0 (or ≤ graph_step) to disable.
+        ns:             NeighborSearch KD-tree of all protein heavy atoms.
+        probe_radius:   clearance threshold (Å) for the protein-interior test.
+    """
     nodes = []
     for res in exposed_residues:
         if "CA" in res:
@@ -196,17 +256,27 @@ def build_surface_graph(exposed_residues: list, graph_step: float) -> dict:
     coords = np.array([c for _, c in nodes])
     ids = [fid for fid, _ in nodes]
 
-    # Pairwise distances (O(n²) but surface residues are a fraction of the total)
     diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
     dists = np.sqrt((diff ** 2).sum(axis=2))
+
+    allow_cross = cross_gap_step > graph_step and ns is not None
+    max_dist = cross_gap_step if allow_cross else graph_step
 
     n = len(ids)
     for i in range(n):
         for j in range(i + 1, n):
             d = dists[i, j]
+            if d > max_dist:
+                continue
             if d <= graph_step:
+                # Surface-adjacent: always valid
                 adj[ids[i]].append((ids[j], float(d)))
                 adj[ids[j]].append((ids[i], float(d)))
+            elif allow_cross:
+                # Cross-gap: only if segment stays in solvent
+                if segment_clears_protein(coords[i], coords[j], ns, probe_radius):
+                    adj[ids[i]].append((ids[j], float(d)))
+                    adj[ids[j]].append((ids[i], float(d)))
 
     return adj
 
@@ -368,6 +438,18 @@ def main():
         "--graph-step", type=float, default=10.0,
         help="(Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge",
     )
+    parser.add_argument(
+        "--cross-gap", type=float, default=20.0,
+        help=(
+            "(Anchor mode) Max Cα–Cα distance (Å) for solvent-crossing edges. "
+            "These edges jump across cavities/clefts but are rejected if the segment "
+            "passes through any protein atom. Set equal to --graph-step to disable."
+        ),
+    )
+    parser.add_argument(
+        "--probe-radius", type=float, default=2.5,
+        help="(Anchor mode) Min clearance from any atom (Å) for a cross-gap edge to be accepted",
+    )
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -409,11 +491,26 @@ def main():
             for res in chain
             if classification.get(res.full_id) == "Exposed"
         ]
+
+        ns = None
+        cross_gap = args.cross_gap
+        if cross_gap > args.graph_step:
+            print("Building protein atom KD-tree for cross-gap solvent test…")
+            ns = build_atom_kd_tree(structure)
+
         print(
             f"Building surface graph ({len(exposed_residues)} exposed residues, "
-            f"edge step ≤ {args.graph_step} Å)…"
+            f"surface edge ≤ {args.graph_step} Å"
+            + (f", cross-gap ≤ {cross_gap} Å" if ns else "")
+            + ")…"
         )
-        adj = build_surface_graph(exposed_residues, args.graph_step)
+        adj = build_surface_graph(
+            exposed_residues,
+            args.graph_step,
+            cross_gap_step=cross_gap,
+            ns=ns,
+            probe_radius=args.probe_radius,
+        )
 
         print(f"Surface walk from {len(anchor_full_ids)} anchor(s), radius ≤ {args.surface_radius} Å…")
         reachable_exposed = surface_walk(adj, anchor_full_ids, args.surface_radius)
