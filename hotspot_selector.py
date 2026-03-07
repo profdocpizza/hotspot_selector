@@ -175,13 +175,20 @@ def fill_supporting_gaps(structure, classification: dict, gap_aa: int = 3) -> di
     return updated
 
 
-def build_atom_kd_tree(structure) -> NeighborSearch:
-    """KD-tree over all protein heavy atoms (non-hydrogen ATOM records)."""
+def build_atom_kd_tree(structure, classification: dict = None) -> NeighborSearch:
+    """
+    KD-tree over protein heavy atoms (non-hydrogen ATOM records).
+
+    If `classification` is provided, only atoms belonging to 'Other' (buried)
+    residues are included.  This allows the protein-interior test to distinguish
+    genuine buried protein from surface backbone atoms.
+    """
     atoms = [
         atom for model in structure
         for chain in model
         for res in chain
         if res.id[0] == " "
+        and (classification is None or classification.get(res.full_id) == "Other")
         for atom in res.get_atoms()
         if atom.element and atom.element.strip().upper() != "H"
     ]
@@ -211,8 +218,9 @@ def segment_clears_protein(
     n_steps = max(2, int(length / sample_step))
     for k in range(n_steps + 1):
         t = k / n_steps
-        # Skip endpoints (first/last 10%) to avoid endpoint-atom artifacts
-        if t < 0.1 or t > 0.9:
+        # Skip endpoints (first/last 10%) to avoid false positives from the
+        # endpoint residues' own atoms
+        if t < 0.10 or t > 0.90:
             continue
         point = p1 + t * vec
         if ns.search(point.tolist(), probe_radius, level="A"):
@@ -223,26 +231,17 @@ def segment_clears_protein(
 def build_surface_graph(
     exposed_residues: list,
     graph_step: float,
-    cross_gap_step: float = 0.0,
-    ns: NeighborSearch = None,
+    ns: NeighborSearch,
     probe_radius: float = 2.5,
 ) -> dict:
     """
     Build an adjacency graph over Exposed residues.
 
-    Short edges (Cα–Cα ≤ graph_step):
-        Added unconditionally — surface-adjacent residues.
+    An edge is added between two Exposed residues whose Cα–Cα distance ≤ graph_step
+    AND whose connecting segment does not pass through the protein interior
+    (validated by sampling the segment with a KD-tree probe).
 
-    Cross-gap edges (graph_step < Cα–Cα ≤ cross_gap_step):
-        Added only if the straight-line segment between the Cα atoms does not
-        pass through any protein atom (KD-tree line test).  These allow the
-        walk to jump across solvent-filled cavities or clefts.
-
-    Args:
-        cross_gap_step: maximum Cα–Cα distance for cross-gap edges.
-                        Set to 0 (or ≤ graph_step) to disable.
-        ns:             NeighborSearch KD-tree of all protein heavy atoms.
-        probe_radius:   clearance threshold (Å) for the protein-interior test.
+    Increase graph_step to allow longer hops across solvent gaps.
     """
     nodes = []
     for res in exposed_residues:
@@ -259,24 +258,15 @@ def build_surface_graph(
     diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
     dists = np.sqrt((diff ** 2).sum(axis=2))
 
-    allow_cross = cross_gap_step > graph_step and ns is not None
-    max_dist = cross_gap_step if allow_cross else graph_step
-
     n = len(ids)
     for i in range(n):
         for j in range(i + 1, n):
             d = dists[i, j]
-            if d > max_dist:
+            if d > graph_step:
                 continue
-            if d <= graph_step:
-                # Surface-adjacent: always valid
+            if segment_clears_protein(coords[i], coords[j], ns, probe_radius):
                 adj[ids[i]].append((ids[j], float(d)))
                 adj[ids[j]].append((ids[i], float(d)))
-            elif allow_cross:
-                # Cross-gap: only if segment stays in solvent
-                if segment_clears_protein(coords[i], coords[j], ns, probe_radius):
-                    adj[ids[i]].append((ids[j], float(d)))
-                    adj[ids[j]].append((ids[i], float(d)))
 
     return adj
 
@@ -436,19 +426,14 @@ def main():
     )
     parser.add_argument(
         "--graph-step", type=float, default=10.0,
-        help="(Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge",
-    )
-    parser.add_argument(
-        "--cross-gap", type=float, default=20.0,
         help=(
-            "(Anchor mode) Max Cα–Cα distance (Å) for solvent-crossing edges. "
-            "These edges jump across cavities/clefts but are rejected if the segment "
-            "passes through any protein atom. Set equal to --graph-step to disable."
+            "(Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge. "
+            "Increase to allow longer hops across solvent gaps/clefts."
         ),
     )
     parser.add_argument(
         "--probe-radius", type=float, default=2.5,
-        help="(Anchor mode) Min clearance from any atom (Å) for a cross-gap edge to be accepted",
+        help="(Anchor mode) Min clearance from any protein atom (Å); edges closer than this are rejected as passing through protein",
     )
     args = parser.parse_args()
 
@@ -492,22 +477,16 @@ def main():
             if classification.get(res.full_id) == "Exposed"
         ]
 
-        ns = None
-        cross_gap = args.cross_gap
-        if cross_gap > args.graph_step:
-            print("Building protein atom KD-tree for cross-gap solvent test…")
-            ns = build_atom_kd_tree(structure)
+        print("Building buried-atom KD-tree for protein-interior test…")
+        ns = build_atom_kd_tree(structure, classification=classification)
 
         print(
             f"Building surface graph ({len(exposed_residues)} exposed residues, "
-            f"surface edge ≤ {args.graph_step} Å"
-            + (f", cross-gap ≤ {cross_gap} Å" if ns else "")
-            + ")…"
+            f"step ≤ {args.graph_step} Å, probe radius {args.probe_radius} Å)…"
         )
         adj = build_surface_graph(
             exposed_residues,
             args.graph_step,
-            cross_gap_step=cross_gap,
             ns=ns,
             probe_radius=args.probe_radius,
         )
