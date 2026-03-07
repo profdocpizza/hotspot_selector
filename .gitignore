@@ -1,4 +1,4 @@
-examples/
+.examples/
 
 # Python
 __pycache__/
@@ -25,6 +25,11 @@ venv/
 *.swp
 *~
 
+# Output files (keep examples, ignore generated outputs)
+*_annotated.pdb
+*_hotspot.pdb
+*_annotated.cif
+*_hotspot.cif
 
 # OS
 .DS_Store
