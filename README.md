@@ -48,7 +48,7 @@ Pass `--anchor CHAIN:RESNUM [...]` to restrict the output to a local surface pat
 
 Instead of Euclidean distance (which would select residues through the protein interior), the tool builds a **surface graph** — nodes are Exposed residues, edges connect Cα atoms within `--graph-step` Å — and runs **Dijkstra** from the anchor(s). Only exposed residues within `--surface-radius` Å of *surface-path* distance are selected, along with their Supporting neighbours.
 
-**Cross-gap solvent edges** (`--cross-gap`, default 20 Å): allows the walk to jump across solvent-filled cavities and clefts — useful for curved, concave, or hollow surfaces where the around-the-surface path is much longer than the straight-line distance. Each candidate long edge is validated by sampling the Cα–Cα segment and rejecting it if any sample point is within `--probe-radius` Å of a protein atom (i.e., it passes through the interior). Set `--cross-gap` equal to `--graph-step` to disable.
+**Cross-gap solvent edges** — controlled by `--graph-step`. The walk only considers edges between exposed residues whose Cα–Cα distance is within `--graph-step` (default 10 Å). Each candidate edge is validated: the Cα–Cα segment is sampled every ~1 Å and checked against a KD-tree of **buried (Other) residue atoms only** — if any sample point is within `--probe-radius` Å of a buried atom, the edge is rejected (it cuts through the protein core). Surface backbone atoms are correctly ignored. To allow hops across larger solvent gaps (cavities, clefts), simply increase `--graph-step`.
 
 ### Options
 
@@ -59,9 +59,8 @@ Instead of Euclidean distance (which would select residues through the protein i
 | `--output-dir` | same dir as input | Where to write output files |
 | `--anchor` | *(off)* | Activate surface-walk mode: one or more `CHAIN:RESNUM` anchors, e.g. `--anchor A:42 B:10` |
 | `--surface-radius` | `25.0` | (Anchor mode) Max surface-path distance (Å) from anchor(s) |
-| `--graph-step` | `10.0` | (Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge |
-| `--cross-gap` | `20.0` | (Anchor mode) Max Cα–Cα for solvent-crossing edges; set equal to `--graph-step` to disable |
-| `--probe-radius` | `2.5` | (Anchor mode) Min clearance (Å) from any protein atom for a cross-gap edge |
+| `--graph-step` | `10.0` | (Anchor mode) Max Cα–Cα for a graph edge; increase to hop across larger solvent gaps |
+| `--probe-radius` | `2.5` | (Anchor mode) Min clearance (Å) from any buried protein atom; edges cutting through buried core are rejected |
 
 ## Visualisation
 
