@@ -362,13 +362,102 @@ class HotspotSelect(Select):
         return label in ("Exposed", "Supporting")
 
 
-def save_pdb(structure, path: Path, select=None):
-    io = PDBIO()
-    io.set_structure(structure)
+def hotspot_ranges(structure, classification: dict) -> str:
+    """
+    Return a compact string of chain:resnum ranges for Exposed+Supporting residues.
+    Example: 'A96-116,A144-155,B1-7'
+    """
+    # Collect hotspot residues per chain, sorted by resnum
+    by_chain: dict[str, list[int]] = {}
+    for model in structure:
+        for chain in model:
+            cid = chain.get_id()
+            for res in chain:
+                if res.id[0] != " ":
+                    continue
+                if classification.get(res.full_id) in ("Exposed", "Supporting"):
+                    by_chain.setdefault(cid, []).append(res.id[1])
+
+    parts = []
+    for cid in sorted(by_chain):
+        nums = sorted(set(by_chain[cid]))
+        # Collapse into contiguous ranges
+        ranges = []
+        start = prev = nums[0]
+        for n in nums[1:]:
+            if n == prev + 1:
+                prev = n
+            else:
+                ranges.append((start, prev))
+                start = prev = n
+        ranges.append((start, prev))
+        for lo, hi in ranges:
+            parts.append(f"{cid}{lo}" if lo == hi else f"{cid}{lo}-{hi}")
+
+    return ",".join(parts)
+
+
+def _wrap_remark(num: int, text: str) -> list[str]:
+    """Wrap a long string into PDB REMARK lines, breaking on spaces where possible."""
+    prefix = f"REMARK {num:3d} "
+    width = 72 - len(prefix)
+    lines = []
+    while len(text) > width:
+        # Find last space within the allowed width
+        cut = text.rfind(" ", 0, width)
+        if cut == -1:
+            cut = width  # no space found, hard-break
+        lines.append(prefix + text[:cut])
+        text = text[cut:].lstrip(" ")
+    if text:
+        lines.append(prefix + text)
+    return lines
+
+
+def build_remarks(cmd: str, ranges: str) -> list[str]:
+    lines = ["REMARK   1"]
+    lines += _wrap_remark(1, f"COMMAND: {cmd}")
+    lines += ["REMARK   2"]
+    # For residue ranges, wrap on commas for readability
+    prefix2 = "REMARK   2 "
+    width2 = 72 - len(prefix2)
+    tag = "HOTSPOT RESIDUES: "
+    text = tag + ranges
+    remark2 = []
+    while len(text) > width2:
+        cut = text.rfind(",", 0, width2)
+        if cut == -1:
+            cut = width2
+        else:
+            cut += 1  # include the comma on this line
+        remark2.append(prefix2 + text[:cut])
+        text = text[cut:]
+    if text:
+        remark2.append(prefix2 + text)
+    lines += remark2
+    lines += ["REMARK   3",
+              "REMARK   3 B-FACTOR ANNOTATION:",
+              "REMARK   3   91 = Exposed (surface, high SASA)",
+              "REMARK   3   81 = Supporting (within 5A of exposed)",
+              "REMARK   3   49 = Other (buried)"]
+    return lines
+
+
+def save_pdb(structure, path: Path, remarks: list[str] = None, select=None):
+    import io as _io
+    pdbio = PDBIO()
+    pdbio.set_structure(structure)
+    buf = _io.StringIO()
     if select is not None:
-        io.save(str(path), select)
+        pdbio.save(buf, select)
     else:
-        io.save(str(path))
+        pdbio.save(buf)
+    pdb_text = buf.getvalue()
+
+    with open(path, "w") as fh:
+        if remarks:
+            fh.write("\n".join(remarks) + "\n")
+        fh.write(pdb_text)
 
 
 def print_summary(classification: dict, out_annotated: Path, out_hotspot: Path, anchor_mode: bool = False):
@@ -542,8 +631,13 @@ def main():
     classification = fill_supporting_gaps(structure, classification, gap_aa=3)
 
     annotate_bfactors(structure, classification)
-    save_pdb(structure, out_annotated)
-    save_pdb(structure, out_hotspot, select=HotspotSelect(classification))
+
+    cmd_str = " ".join(sys.argv)
+    ranges = hotspot_ranges(structure, classification)
+    remarks = build_remarks(cmd_str, ranges)
+
+    save_pdb(structure, out_annotated, remarks=remarks)
+    save_pdb(structure, out_hotspot, remarks=remarks, select=HotspotSelect(classification))
 
     print_summary(classification, out_annotated, out_hotspot, anchor_mode=anchor_mode)
 
