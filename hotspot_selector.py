@@ -109,6 +109,72 @@ def classify_residues(structure, sasa_threshold: float, support_dist: float):
     return classification
 
 
+def fill_supporting_gaps(structure, classification: dict, gap_aa: int = 3) -> dict:
+    """
+    Ensure no Supporting residue is isolated in sequence space.
+
+    Per chain (sorted by residue number):
+    - If two Supporting residues are within `gap_aa` sequence positions of each other,
+      fill every residue between them as Supporting (closes small gaps).
+    - If a Supporting residue has NO Supporting partner within `gap_aa` positions,
+      add its immediate sequence neighbours (±1) as Supporting.
+
+    Exposed residues are never downgraded.
+    """
+    # Build per-chain lookup: sorted (resnum -> full_id) for standard residues
+    res_by_chain: dict[str, list[tuple[int, tuple]]] = {}
+    res_lookup: dict[tuple, tuple] = {}  # (chain_id, resnum) -> full_id
+
+    for model in structure:
+        for chain in model:
+            chain_id = chain.get_id()
+            for res in chain:
+                if res.id[0] != " ":
+                    continue
+                resnum = res.id[1]
+                res_by_chain.setdefault(chain_id, []).append((resnum, res.full_id))
+                res_lookup[(chain_id, resnum)] = res.full_id
+
+    for chain_id in res_by_chain:
+        res_by_chain[chain_id].sort()
+
+    updated = dict(classification)
+
+    for chain_id, residues in res_by_chain.items():
+        supporting_pos = sorted(
+            resnum for resnum, fid in residues
+            if classification.get(fid) == "Supporting"
+        )
+        if not supporting_pos:
+            continue
+
+        supporting_set = set(supporting_pos)
+
+        for pos in supporting_pos:
+            nearby = [p for p in supporting_set if p != pos and abs(p - pos) <= gap_aa]
+
+            if not nearby:
+                # Lone residue: promote immediate sequence neighbours
+                for delta in (-1, +1):
+                    key = (chain_id, pos + delta)
+                    if key in res_lookup:
+                        fid = res_lookup[key]
+                        if updated.get(fid) != "Exposed":
+                            updated[fid] = "Supporting"
+            else:
+                # Fill the gap to each nearby Supporting partner
+                for other_pos in nearby:
+                    lo, hi = min(pos, other_pos), max(pos, other_pos)
+                    for fill in range(lo, hi + 1):
+                        key = (chain_id, fill)
+                        if key in res_lookup:
+                            fid = res_lookup[key]
+                            if updated.get(fid) != "Exposed":
+                                updated[fid] = "Supporting"
+
+    return updated
+
+
 def build_surface_graph(exposed_residues: list, graph_step: float) -> dict:
     """
     Build an adjacency graph over Exposed residues using Cα–Cα distances.
@@ -395,6 +461,9 @@ def main():
             f"and {sum(1 for v in classification.values() if v=='Supporting')} supporting "
             "residues in anchor neighbourhood."
         )
+
+    print("Filling isolated supporting residues (gap ≤ 3 AA)…")
+    classification = fill_supporting_gaps(structure, classification, gap_aa=3)
 
     annotate_bfactors(structure, classification)
     save_pdb(structure, out_annotated)
