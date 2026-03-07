@@ -36,7 +36,19 @@ python hotspot_selector.py structure.pdb --sasa-threshold 0.20 --support-dist 6.
 
 # Write outputs to a specific directory
 python hotspot_selector.py structure.pdb --output-dir ./results
+
+# Anchor / surface-walk mode: select a surface patch around known residues
+python hotspot_selector.py structure.pdb --anchor A:42
+python hotspot_selector.py structure.pdb --anchor A:42 A:43 B:10 --surface-radius 30.0
 ```
+
+### Anchor / surface-walk mode
+
+Pass `--anchor CHAIN:RESNUM [...]` to restrict the output to a local surface patch around known residue(s).
+
+Instead of Euclidean distance (which would select residues through the protein interior), the tool builds a **surface graph** — nodes are Exposed residues, edges connect Cα atoms within `--graph-step` Å — and runs **Dijkstra** from the anchor(s). Only exposed residues within `--surface-radius` Å of *surface-path* distance are selected, along with their Supporting neighbours.
+
+This is useful when you already know a functional site (e.g. a binding interface residue) and want to extract the surrounding surface patch.
 
 ### Options
 
@@ -45,6 +57,9 @@ python hotspot_selector.py structure.pdb --output-dir ./results
 | `--sasa-threshold` | `0.25` | Relative SASA cutoff for Exposed classification (0–1) |
 | `--support-dist` | `5.0` | Distance (Å) used to identify Supporting residues |
 | `--output-dir` | same dir as input | Where to write output files |
+| `--anchor` | *(off)* | Activate surface-walk mode: one or more `CHAIN:RESNUM` anchors, e.g. `--anchor A:42 B:10` |
+| `--surface-radius` | `25.0` | (Anchor mode) Max surface-path distance (Å) from anchor(s) |
+| `--graph-step` | `10.0` | (Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge |
 
 ## Visualisation
 

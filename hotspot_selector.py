@@ -10,9 +10,15 @@ Classifies residues as:
 Outputs:
   <stem>_annotated.pdb  — full structure; beta-factor encodes class (91/81/49)
   <stem>_hotspot.pdb    — Exposed + Supporting residues only
+
+Anchor / surface-walk mode (--anchor):
+  Restricts output to exposed residues reachable from anchor residue(s) by walking
+  *along the surface* (Dijkstra on a Cα graph of Exposed residues only), plus their
+  Supporting neighbours.  Paths cannot shortcut through buried interior.
 """
 
 import argparse
+import heapq
 import sys
 from pathlib import Path
 
@@ -103,6 +109,109 @@ def classify_residues(structure, sasa_threshold: float, support_dist: float):
     return classification
 
 
+def build_surface_graph(exposed_residues: list, graph_step: float) -> dict:
+    """
+    Build an adjacency graph over Exposed residues using Cα–Cα distances.
+
+    Nodes  : residue full_id
+    Edges  : pair of exposed residues whose Cα–Cα distance ≤ graph_step
+    Returns: dict { full_id -> list of (neighbour_full_id, distance) }
+    """
+    # Collect Cα positions; fall back to first atom if no Cα present
+    nodes = []
+    for res in exposed_residues:
+        if "CA" in res:
+            coord = res["CA"].get_vector().get_array()
+        else:
+            coord = next(iter(res.get_atoms())).get_vector().get_array()
+        nodes.append((res.full_id, coord))
+
+    adj = {fid: [] for fid, _ in nodes}
+    coords = np.array([c for _, c in nodes])
+    ids = [fid for fid, _ in nodes]
+
+    # Pairwise distances (O(n²) but surface residues are a fraction of the total)
+    diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
+    dists = np.sqrt((diff ** 2).sum(axis=2))
+
+    n = len(ids)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = dists[i, j]
+            if d <= graph_step:
+                adj[ids[i]].append((ids[j], float(d)))
+                adj[ids[j]].append((ids[i], float(d)))
+
+    return adj
+
+
+def surface_walk(adj: dict, anchor_ids: set, surface_radius: float) -> set:
+    """
+    Dijkstra from the set of anchor residues through the surface graph.
+
+    Returns the set of residue full_ids reachable within `surface_radius` Å
+    of accumulated surface-path distance.
+    """
+    # Multi-source Dijkstra: initialise heap with all anchors at distance 0
+    dist = {fid: float("inf") for fid in adj}
+    heap = []
+    for aid in anchor_ids:
+        if aid in dist:
+            dist[aid] = 0.0
+            heapq.heappush(heap, (0.0, aid))
+
+    while heap:
+        d, u = heapq.heappop(heap)
+        if d > dist[u]:
+            continue
+        for v, w in adj.get(u, []):
+            nd = d + w
+            if nd < dist[v]:
+                dist[v] = nd
+                heapq.heappush(heap, (nd, v))
+
+    return {fid for fid, d in dist.items() if d <= surface_radius}
+
+
+def parse_anchor(token: str) -> tuple:
+    """Parse 'CHAIN:RESNUM' or 'CHAIN:RESNUM:ICODE' into (chain, resnum, icode)."""
+    parts = token.split(":")
+    if len(parts) < 2:
+        raise argparse.ArgumentTypeError(
+            f"Anchor '{token}' must be in CHAIN:RESNUM format, e.g. A:42"
+        )
+    chain = parts[0]
+    try:
+        resnum = int(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Residue number in '{token}' must be an integer"
+        )
+    icode = parts[2] if len(parts) > 2 else " "
+    return (chain, resnum, icode)
+
+
+def resolve_anchor_full_ids(structure, anchors: list) -> set:
+    """Map parsed anchor tuples to BioPython full_ids, with helpful errors."""
+    resolved = set()
+    for chain_id, resnum, icode in anchors:
+        found = False
+        for model in structure:
+            if chain_id not in model:
+                continue
+            chain = model[chain_id]
+            res_id = (" ", resnum, icode)
+            if res_id in chain:
+                resolved.add(chain[res_id].full_id)
+                found = True
+                break
+        if not found:
+            sys.exit(
+                f"Error: anchor residue {chain_id}:{resnum} not found in structure."
+            )
+    return resolved
+
+
 def annotate_bfactors(structure, classification: dict):
     """Set b-factor on every atom according to residue classification."""
     for model in structure:
@@ -136,12 +245,13 @@ def save_pdb(structure, path: Path, select=None):
         io.save(str(path))
 
 
-def print_summary(classification: dict, out_annotated: Path, out_hotspot: Path):
+def print_summary(classification: dict, out_annotated: Path, out_hotspot: Path, anchor_mode: bool = False):
     counts = {"Exposed": 0, "Supporting": 0, "Other": 0}
     for label in classification.values():
         counts[label] += 1
 
-    print("\n── Hotspot Selector Results ──────────────────────────────────")
+    mode_tag = " [anchor/surface-walk]" if anchor_mode else ""
+    print(f"\n── Hotspot Selector Results{mode_tag} ──────────────────────────────")
     print(f"  Exposed    residues : {counts['Exposed']:>5}  (β = {BFACTOR_EXPOSED:.0f})")
     print(f"  Supporting residues : {counts['Supporting']:>5}  (β = {BFACTOR_SUPPORTING:.0f})")
     print(f"  Other      residues : {counts['Other']:>5}  (β = {BFACTOR_OTHER:.0f})")
@@ -175,6 +285,23 @@ def main():
         "--output-dir", type=Path, default=None,
         help="Directory for output files (default: same as input)",
     )
+    # Anchor / surface-walk mode
+    parser.add_argument(
+        "--anchor", nargs="+", metavar="CHAIN:RESNUM", default=None,
+        help=(
+            "Activate surface-walk mode: one or more anchor residues as CHAIN:RESNUM "
+            "(e.g. --anchor A:42 A:43). Only Exposed residues reachable from the "
+            "anchor(s) along the surface (within --surface-radius) are kept."
+        ),
+    )
+    parser.add_argument(
+        "--surface-radius", type=float, default=25.0,
+        help="(Anchor mode) Max surface-path distance (Å) from anchor(s)",
+    )
+    parser.add_argument(
+        "--graph-step", type=float, default=10.0,
+        help="(Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge",
+    )
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -195,11 +322,85 @@ def main():
     print(f"Classifying residues (SASA threshold={args.sasa_threshold}, support dist={args.support_dist} Å)…")
     classification = classify_residues(structure, args.sasa_threshold, args.support_dist)
 
+    anchor_mode = args.anchor is not None
+    if anchor_mode:
+        anchors = [parse_anchor(t) for t in args.anchor]
+        anchor_full_ids = resolve_anchor_full_ids(structure, anchors)
+
+        # Verify anchors are Exposed
+        for fid in anchor_full_ids:
+            if classification.get(fid) != "Exposed":
+                label = classification.get(fid, "unknown / HETATM")
+                print(
+                    f"  Warning: anchor {fid} is classified as '{label}', not Exposed. "
+                    "It will still be used as a surface-walk start point."
+                )
+
+        # Build surface graph over all Exposed residues
+        exposed_residues = [
+            res for model in structure
+            for chain in model
+            for res in chain
+            if classification.get(res.full_id) == "Exposed"
+        ]
+        print(
+            f"Building surface graph ({len(exposed_residues)} exposed residues, "
+            f"edge step ≤ {args.graph_step} Å)…"
+        )
+        adj = build_surface_graph(exposed_residues, args.graph_step)
+
+        print(f"Surface walk from {len(anchor_full_ids)} anchor(s), radius ≤ {args.surface_radius} Å…")
+        reachable_exposed = surface_walk(adj, anchor_full_ids, args.surface_radius)
+
+        # Rebuild classification: keep only reachable exposed + their supporting neighbours
+        # For Supporting, recompute from scratch restricted to reachable exposed atoms
+        reachable_exposed_atoms = [
+            atom for model in structure
+            for chain in model
+            for res in chain
+            if res.full_id in reachable_exposed
+            for atom in res.get_atoms()
+        ]
+        if reachable_exposed_atoms:
+            reachable_coords = np.array(
+                [a.get_vector().get_array() for a in reachable_exposed_atoms]
+            )
+        else:
+            reachable_coords = np.empty((0, 3))
+
+        restricted = {}
+        for model in structure:
+            for chain in model:
+                for res in chain:
+                    if res.id[0] != " ":
+                        continue
+                    if res.full_id in reachable_exposed:
+                        restricted[res.full_id] = "Exposed"
+                        continue
+                    # Supporting: any atom within support_dist of a reachable exposed atom
+                    res_coords = np.array(
+                        [a.get_vector().get_array() for a in res.get_atoms()]
+                    )
+                    if len(res_coords) > 0 and len(reachable_coords) > 0:
+                        diffs = res_coords[:, np.newaxis, :] - reachable_coords[np.newaxis, :, :]
+                        dists = np.sqrt((diffs ** 2).sum(axis=2))
+                        if dists.min() <= args.support_dist:
+                            restricted[res.full_id] = "Supporting"
+                            continue
+                    restricted[res.full_id] = "Other"
+
+        classification = restricted
+        print(
+            f"  Selected {sum(1 for v in classification.values() if v=='Exposed')} exposed "
+            f"and {sum(1 for v in classification.values() if v=='Supporting')} supporting "
+            "residues in anchor neighbourhood."
+        )
+
     annotate_bfactors(structure, classification)
     save_pdb(structure, out_annotated)
     save_pdb(structure, out_hotspot, select=HotspotSelect(classification))
 
-    print_summary(classification, out_annotated, out_hotspot)
+    print_summary(classification, out_annotated, out_hotspot, anchor_mode=anchor_mode)
 
 
 if __name__ == "__main__":
