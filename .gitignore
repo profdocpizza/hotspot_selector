@@ -30,10 +30,8 @@ venv/
 *_hotspot.pdb
 *_annotated.cif
 *_hotspot.cif
+outputs/
 
 # OS
 .DS_Store
 Thumbs.db
-
-
-examples/

@@ -10,6 +10,7 @@ Classifies residues as:
 Outputs:
   <stem>_annotated.pdb  — full structure; beta-factor encodes class (91/81/49)
   <stem>_hotspot.pdb    — Exposed + Supporting residues only
+  <stem>_hotspot_residue_index.txt — compact hotspot residue index string
 
 Anchor / surface-walk mode (--anchor):
   Restricts output to exposed residues reachable from anchor residue(s) by walking
@@ -438,7 +439,7 @@ def build_remarks(cmd: str, ranges: str) -> list[str]:
     lines += ["REMARK   3",
               "REMARK   3 B-FACTOR ANNOTATION:",
               "REMARK   3   91 = Exposed (surface, high SASA)",
-              "REMARK   3   81 = Supporting (within 5A of exposed)",
+              "REMARK   3   81 = Supporting (within support distance of exposed)",
               "REMARK   3   49 = Other (buried)"]
     return lines
 
@@ -460,7 +461,13 @@ def save_pdb(structure, path: Path, remarks: list[str] = None, select=None):
         fh.write(pdb_text)
 
 
-def print_summary(classification: dict, out_annotated: Path, out_hotspot: Path, anchor_mode: bool = False):
+def print_summary(
+    classification: dict,
+    out_annotated: Path,
+    out_hotspot: Path,
+    out_residue_index: Path,
+    anchor_mode: bool = False,
+):
     counts = {"Exposed": 0, "Supporting": 0, "Other": 0}
     for label in classification.values():
         counts[label] += 1
@@ -474,6 +481,7 @@ def print_summary(classification: dict, out_annotated: Path, out_hotspot: Path, 
     print()
     print(f"  Annotated PDB  → {out_annotated}")
     print(f"  Hotspot PDB    → {out_hotspot}")
+    print(f"  Residue index  → {out_residue_index}")
     print()
     print("── Visualisation ─────────────────────────────────────────────")
     print("  Open the annotated PDB in NanoViewer (https://nanoviewer.xyz)")
@@ -489,11 +497,11 @@ def main():
     )
     parser.add_argument("input", type=Path, help="Input structure file (.pdb or .cif)")
     parser.add_argument(
-        "--sasa-threshold", type=float, default=0.25,
+        "--sasa-threshold", type=float, default=0.1,
         help="Relative SASA threshold to classify a residue as Exposed (0–1)",
     )
     parser.add_argument(
-        "--support-dist", type=float, default=5.0,
+        "--support-dist", type=float, default=4.0,
         help="Distance (Å) within which a residue is considered Supporting",
     )
     parser.add_argument(
@@ -514,7 +522,7 @@ def main():
         help="(Anchor mode) Max surface-path distance (Å) from anchor(s)",
     )
     parser.add_argument(
-        "--graph-step", type=float, default=10.0,
+        "--graph-step", type=float, default=20.0,
         help=(
             "(Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge. "
             "Increase to allow longer hops across solvent gaps/clefts."
@@ -534,6 +542,7 @@ def main():
     stem = args.input.stem
     out_annotated = out_dir / f"{stem}_annotated.pdb"
     out_hotspot   = out_dir / f"{stem}_hotspot.pdb"
+    out_residue_index = out_dir / f"{stem}_hotspot_residue_index.txt"
 
     print(f"Loading structure: {args.input}")
     structure = load_structure(args.input)
@@ -638,8 +647,15 @@ def main():
 
     save_pdb(structure, out_annotated, remarks=remarks)
     save_pdb(structure, out_hotspot, remarks=remarks, select=HotspotSelect(classification))
+    out_residue_index.write_text(ranges + "\n", encoding="utf-8")
 
-    print_summary(classification, out_annotated, out_hotspot, anchor_mode=anchor_mode)
+    print_summary(
+        classification,
+        out_annotated,
+        out_hotspot,
+        out_residue_index,
+        anchor_mode=anchor_mode,
+    )
 
 
 if __name__ == "__main__":
