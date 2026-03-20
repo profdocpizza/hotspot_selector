@@ -41,6 +41,7 @@ python hotspot_selector.py structure.pdb --output-dir ./results
 # Anchor / surface-walk mode: select a surface patch around known residues
 python hotspot_selector.py structure.pdb --anchor A:42
 python hotspot_selector.py structure.pdb --anchor A:42 A:43 B:10 --surface-radius 30.0
+python hotspot_selector.py structure.pdb --anchor A:42 --surface-radius 30.0 --max_residues 400
 ```
 
 ### Example run (2XRP, anchors E:308 and A:108)
@@ -66,6 +67,8 @@ Instead of Euclidean distance (which would select residues through the protein i
 
 **Cross-gap solvent edges** — controlled by `--graph-step`. The walk only considers edges between exposed residues whose Cα–Cα distance is within `--graph-step` (default 20 Å). Each candidate edge is validated: the Cα–Cα segment is sampled every ~1 Å and checked against a KD-tree of **buried (Other) residue atoms only** — if any sample point is within `--probe-radius` Å of a buried atom, the edge is rejected (it cuts through the protein core). Surface backbone atoms are correctly ignored. To allow hops across larger solvent gaps (cavities, clefts), simply increase `--graph-step`.
 
+If `--max_residues` is set (anchor mode), the tool evaluates the selected hotspot size (Exposed + Supporting residues) and, when needed, automatically decreases the effective `--surface-radius` until the selection is within the cap.
+
 ### Options
 
 | Flag | Default | Description |
@@ -75,6 +78,7 @@ Instead of Euclidean distance (which would select residues through the protein i
 | `--output-dir` | same dir as input | Where to write output files |
 | `--anchor` | *(off)* | Activate surface-walk mode: one or more `CHAIN:RESNUM` anchors, e.g. `--anchor A:42 B:10` |
 | `--surface-radius` | `25.0` | (Anchor mode) Max surface-path distance (Å) from anchor(s) |
+| `--max_residues` | `None` | (Anchor mode) Cap hotspot size (Exposed+Supporting); if exceeded, `--surface-radius` is reduced automatically until the cap is met |
 | `--graph-step` | `20.0` | (Anchor mode) Max Cα–Cα for a graph edge; increase to hop across larger solvent gaps |
 | `--probe-radius` | `2.5` | (Anchor mode) Min clearance (Å) from any buried protein atom; edges cutting through buried core are rejected |
 

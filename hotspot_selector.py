@@ -339,6 +339,94 @@ def resolve_anchor_full_ids(structure, anchors: list) -> set:
     return resolved
 
 
+def restrict_classification_to_anchor_patch(
+    structure,
+    classification: dict,
+    anchor_full_ids: set,
+    support_dist: float,
+    surface_radius: float,
+    graph_step: float,
+    probe_radius: float,
+) -> dict:
+    """Keep only reachable Exposed residues within radius and their Supporting neighbours."""
+    exposed_residues = [
+        res for model in structure
+        for chain in model
+        for res in chain
+        if classification.get(res.full_id) == "Exposed"
+    ]
+
+    ns = build_atom_kd_tree(structure, classification=classification)
+    adj = build_surface_graph(
+        exposed_residues,
+        graph_step,
+        ns=ns,
+        probe_radius=probe_radius,
+    )
+    reachable_exposed = surface_walk(adj, anchor_full_ids, surface_radius)
+
+    reachable_exposed_atoms = [
+        atom for model in structure
+        for chain in model
+        for res in chain
+        if res.full_id in reachable_exposed
+        for atom in res.get_atoms()
+    ]
+    if reachable_exposed_atoms:
+        reachable_coords = np.array(
+            [a.get_vector().get_array() for a in reachable_exposed_atoms]
+        )
+    else:
+        reachable_coords = np.empty((0, 3))
+
+    restricted = {}
+    for model in structure:
+        for chain in model:
+            for res in chain:
+                if res.id[0] != " ":
+                    continue
+                if res.full_id in reachable_exposed:
+                    restricted[res.full_id] = "Exposed"
+                    continue
+                res_coords = np.array([a.get_vector().get_array() for a in res.get_atoms()])
+                if len(res_coords) > 0 and len(reachable_coords) > 0:
+                    diffs = res_coords[:, np.newaxis, :] - reachable_coords[np.newaxis, :, :]
+                    dists = np.sqrt((diffs ** 2).sum(axis=2))
+                    if dists.min() <= support_dist:
+                        restricted[res.full_id] = "Supporting"
+                        continue
+                restricted[res.full_id] = "Other"
+
+    return restricted
+
+
+def count_hotspot_residues(classification: dict) -> int:
+    return sum(1 for v in classification.values() if v in ("Exposed", "Supporting"))
+
+
+def evaluate_hotspot_count(
+    structure,
+    base_classification: dict,
+    anchor_full_ids: set,
+    support_dist: float,
+    surface_radius: float,
+    graph_step: float,
+    probe_radius: float,
+) -> tuple[dict, int]:
+    """Return (classification_after_gap_fill, hotspot_count) for a given radius."""
+    restricted = restrict_classification_to_anchor_patch(
+        structure,
+        base_classification,
+        anchor_full_ids,
+        support_dist,
+        surface_radius,
+        graph_step,
+        probe_radius,
+    )
+    filled = fill_supporting_gaps(structure, restricted, gap_aa=3)
+    return filled, count_hotspot_residues(filled)
+
+
 def annotate_bfactors(structure, classification: dict):
     """Set b-factor on every atom according to residue classification."""
     for model in structure:
@@ -522,6 +610,13 @@ def main():
         help="(Anchor mode) Max surface-path distance (Å) from anchor(s)",
     )
     parser.add_argument(
+        "--max_residues", dest="max_residues", type=int, default=None,
+        help=(
+            "(Anchor mode) Maximum hotspot residue count (Exposed+Supporting). "
+            "If exceeded, --surface-radius is reduced automatically until the cap is met."
+        ),
+    )
+    parser.add_argument(
         "--graph-step", type=float, default=20.0,
         help=(
             "(Anchor mode) Max Cα–Cα distance (Å) for a surface graph edge. "
@@ -536,6 +631,10 @@ def main():
 
     if not args.input.exists():
         sys.exit(f"Error: input file not found: {args.input}")
+    if args.surface_radius < 0:
+        sys.exit("Error: --surface-radius must be >= 0.")
+    if args.max_residues is not None and args.max_residues <= 0:
+        sys.exit("Error: --max_residues must be a positive integer.")
 
     out_dir = args.output_dir if args.output_dir else args.input.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -558,7 +657,6 @@ def main():
         anchors = [parse_anchor(t) for t in args.anchor]
         anchor_full_ids = resolve_anchor_full_ids(structure, anchors)
 
-        # Verify anchors are Exposed
         for fid in anchor_full_ids:
             if classification.get(fid) != "Exposed":
                 label = classification.get(fid, "unknown / HETATM")
@@ -567,77 +665,89 @@ def main():
                     "It will still be used as a surface-walk start point."
                 )
 
-        # Build surface graph over all Exposed residues
-        exposed_residues = [
-            res for model in structure
-            for chain in model
-            for res in chain
-            if classification.get(res.full_id) == "Exposed"
-        ]
-
         print("Building buried-atom KD-tree for protein-interior test…")
-        ns = build_atom_kd_tree(structure, classification=classification)
-
+        exposed_count = sum(1 for v in classification.values() if v == "Exposed")
         print(
-            f"Building surface graph ({len(exposed_residues)} exposed residues, "
+            f"Building surface graph ({exposed_count} exposed residues, "
             f"step ≤ {args.graph_step} Å, probe radius {args.probe_radius} Å)…"
         )
-        adj = build_surface_graph(
-            exposed_residues,
+
+        selected_radius = args.surface_radius
+        base_classification = classification
+        classification, initial_hotspot_count = evaluate_hotspot_count(
+            structure,
+            base_classification,
+            anchor_full_ids,
+            args.support_dist,
+            selected_radius,
             args.graph_step,
-            ns=ns,
-            probe_radius=args.probe_radius,
+            args.probe_radius,
         )
 
-        print(f"Surface walk from {len(anchor_full_ids)} anchor(s), radius ≤ {args.surface_radius} Å…")
-        reachable_exposed = surface_walk(adj, anchor_full_ids, args.surface_radius)
-
-        # Rebuild classification: keep only reachable exposed + their supporting neighbours
-        # For Supporting, recompute from scratch restricted to reachable exposed atoms
-        reachable_exposed_atoms = [
-            atom for model in structure
-            for chain in model
-            for res in chain
-            if res.full_id in reachable_exposed
-            for atom in res.get_atoms()
-        ]
-        if reachable_exposed_atoms:
-            reachable_coords = np.array(
-                [a.get_vector().get_array() for a in reachable_exposed_atoms]
+        if args.max_residues is not None:
+            print(
+                f"Applying residue cap: {initial_hotspot_count} residues at radius "
+                f"{selected_radius:.3f} Å (max {args.max_residues})"
             )
-        else:
-            reachable_coords = np.empty((0, 3))
+            if initial_hotspot_count > args.max_residues:
+                lo, hi = 0.0, args.surface_radius
+                best_radius = None
+                best_classification = None
 
-        restricted = {}
-        for model in structure:
-            for chain in model:
-                for res in chain:
-                    if res.id[0] != " ":
-                        continue
-                    if res.full_id in reachable_exposed:
-                        restricted[res.full_id] = "Exposed"
-                        continue
-                    # Supporting: any atom within support_dist of a reachable exposed atom
-                    res_coords = np.array(
-                        [a.get_vector().get_array() for a in res.get_atoms()]
+                # Binary search for largest radius that satisfies cap
+                for _ in range(20):
+                    mid = (lo + hi) / 2.0
+                    cand, cnt = evaluate_hotspot_count(
+                        structure,
+                        base_classification,
+                        anchor_full_ids,
+                        args.support_dist,
+                        mid,
+                        args.graph_step,
+                        args.probe_radius,
                     )
-                    if len(res_coords) > 0 and len(reachable_coords) > 0:
-                        diffs = res_coords[:, np.newaxis, :] - reachable_coords[np.newaxis, :, :]
-                        dists = np.sqrt((diffs ** 2).sum(axis=2))
-                        if dists.min() <= args.support_dist:
-                            restricted[res.full_id] = "Supporting"
-                            continue
-                    restricted[res.full_id] = "Other"
+                    if cnt <= args.max_residues:
+                        best_radius = mid
+                        best_classification = cand
+                        lo = mid
+                    else:
+                        hi = mid
 
-        classification = restricted
+                if best_classification is None:
+                    zero_classification, zero_count = evaluate_hotspot_count(
+                        structure,
+                        base_classification,
+                        anchor_full_ids,
+                        args.support_dist,
+                        0.0,
+                        args.graph_step,
+                        args.probe_radius,
+                    )
+                    if zero_count > args.max_residues:
+                        sys.exit(
+                            "Error: --max_residues is too small to satisfy even at "
+                            "surface radius 0. Increase --max_residues or adjust anchors."
+                        )
+                    best_radius = 0.0
+                    best_classification = zero_classification
+
+                selected_radius = best_radius
+                classification = best_classification
+                print(
+                    f"  Reduced --surface-radius to {selected_radius:.3f} Å "
+                    f"to satisfy --max_residues={args.max_residues}."
+                )
+
+        print(f"Surface walk from {len(anchor_full_ids)} anchor(s), radius ≤ {selected_radius:.3f} Å…")
         print(
             f"  Selected {sum(1 for v in classification.values() if v=='Exposed')} exposed "
             f"and {sum(1 for v in classification.values() if v=='Supporting')} supporting "
             "residues in anchor neighbourhood."
         )
 
-    print("Filling isolated supporting residues (gap ≤ 3 AA)…")
-    classification = fill_supporting_gaps(structure, classification, gap_aa=3)
+    if not anchor_mode:
+        print("Filling isolated supporting residues (gap ≤ 3 AA)…")
+        classification = fill_supporting_gaps(structure, classification, gap_aa=3)
 
     annotate_bfactors(structure, classification)
 
