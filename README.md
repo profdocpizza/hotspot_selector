@@ -63,49 +63,37 @@ python hotspot_selector.py --help
 
 ## Usage
 
-### Basic usage (minimal options)
+Hotspot Selector uses **anchor mode**: you specify one or more anchor residues on the surface, and the tool selects a local surface patch around them using Dijkstra's algorithm on the surface graph.
 
-Select the entire accessible surface:
-
-```bash
-# Load a PDB file (auto-detects format)
-python hotspot_selector.py structure.pdb
-
-# Or a CIF file
-python hotspot_selector.py structure.cif
-
-# Write outputs to a specific directory
-python hotspot_selector.py structure.pdb --output-dir ./results
-```
-
-### Tuning sensitivity (global mode)
-
-Adjust what counts as "exposed" or "supporting":
+### Basic example
 
 ```bash
-# Stricter Exposed threshold (10% → 20% SASA)
-python hotspot_selector.py structure.pdb --sasa-threshold 0.20
-
-# Larger Supporting shell (4 Å → 6 Å)
-python hotspot_selector.py structure.pdb --support-dist 6.0
-
-# Both together
-python hotspot_selector.py structure.pdb --sasa-threshold 0.20 --support-dist 6.0
-```
-
-### Anchor / surface-walk mode (local patches)
-
-Select a localized surface patch around one or more anchor residues:
-
-```bash
-# Single anchor
+# Single anchor on chain A, residue 42
 python hotspot_selector.py structure.pdb --anchor A:42
 
 # Multiple anchors
-python hotspot_selector.py structure.pdb --anchor A:42 A:43 B:10 --surface-radius 30.0
+python hotspot_selector.py structure.pdb --anchor A:42 A:43 B:10
 
-# With hotspot size cap (auto-reduces radius if needed)
-python hotspot_selector.py structure.pdb --anchor A:42 --max_residues 200
+# Specify output directory
+python hotspot_selector.py structure.pdb --anchor A:42 --output-dir ./results
+```
+
+### Tuning the selection (optional)
+
+Control surface coverage and residue classification:
+
+```bash
+# Increase surface radius to select larger patches (default 25 Å)
+python hotspot_selector.py structure.pdb --anchor A:42 --surface-radius 40.0
+
+# Stricter Exposed threshold (10% → 20% SASA; smaller patches)
+python hotspot_selector.py structure.pdb --anchor A:42 --sasa-threshold 0.20
+
+# Cap the total hotspot size (Exposed + Supporting)
+python hotspot_selector.py structure.pdb --anchor A:42 --max_residues 150
+
+# Extend Supporting shell (4 Å → 6 Å; more structural context)
+python hotspot_selector.py structure.pdb --anchor A:42 --support-dist 6.0
 ```
 
 ### Example walkthrough (2XRP from PDB)
@@ -117,17 +105,15 @@ mkdir -p examples outputs
 # Download a test structure from RCSB PDB
 curl -fsSL https://files.rcsb.org/download/2XRP.pdb -o examples/2XRP.pdb
 
-# Run hotspot selection with a single anchor (B:409)
+# Run hotspot selection around anchor B:409
 python hotspot_selector.py examples/2XRP.pdb --anchor B:409 --output-dir ./outputs
 
-# List outputs
+# Inspect outputs
 ls -lh ./outputs/2XRP_*
-
-# View the residue index (compact format for pipelines)
 cat ./outputs/2XRP_hotspot_residue_index.txt
 ```
 
-**Expected output for B:409:**
+**Expected output:**
 ```
 Exposed residues: 64
 Supporting residues: 147
@@ -144,26 +130,22 @@ Output files:
 | `--sasa-threshold` | `0.1` | Relative SASA cutoff for Exposed classification (0–1) |
 | `--support-dist` | `4.0` | Distance (Å) used to identify Supporting residues |
 | `--output-dir` | same dir as input | Where to write output files |
-| `--anchor` | *(off)* | Activate surface-walk mode: one or more `CHAIN:RESNUM` anchors, e.g. `--anchor A:42 B:10` |
-| `--surface-radius` | `25.0` | (Anchor mode) Max surface-path distance (Å) from anchor(s) |
-| `--max_residues` | `None` | (Anchor mode) Cap hotspot size (Exposed+Supporting); if exceeded, `--surface-radius` is reduced automatically until the cap is met |
-| `--graph-step` | `20.0` | (Anchor mode) Max Cα–Cα for a graph edge; increase to hop across larger solvent gaps |
-| `--probe-radius` | `2.5` | (Anchor mode) Min clearance (Å) from any buried protein atom; edges cutting through buried core are rejected |
+| `--anchor` | *(required)* | One or more anchor residues: `CHAIN:RESNUM` (e.g., `--anchor A:42 B:10`) |
+| `--surface-radius` | `25.0` | Max surface-path distance (Å) from anchor(s) |
+| `--max_residues` | `None` | Cap hotspot size (Exposed+Supporting); if exceeded, `--surface-radius` is reduced automatically until the cap is met |
+| `--graph-step` | `20.0` | Max Cα–Cα for a graph edge; increase to hop across larger solvent gaps |
+| `--probe-radius` | `2.5` | Min clearance (Å) from any buried protein atom; edges cutting through buried core are rejected |
 
-### How anchor / surface-walk mode works
+### Surface-walk algorithm
 
-**The Problem:** Euclidean distance selects residues through the protein interior, which is not useful for surface design. You need *surface-path* distance instead.
-
-**The Solution:** Build a surface-only graph and use Dijkstra's algorithm to find true geodesic distance on the surface.
+Why Dijkstra on a surface graph? Euclidean distance selects residues through the protein interior, which is not useful for design. The tool instead builds a surface-only graph to find true surface-path distance:
 
 **Algorithm:**
 1. **Build surface graph**: Nodes = all Exposed residues. Edges connect residues whose Cα atoms are within `--graph-step` Å (default 20 Å).
-2. **Validate edges**: For each candidate edge, sample the Cα–Cα segment every ~1 Å and check against a KD-tree of buried (Other) atom positions. If any sample point is within `--probe-radius` Å of a buried atom, **reject the edge** (it cuts through the protein core). Backbone atoms of surface residues are correctly ignored.
+2. **Validate edges**: For each candidate edge, sample the Cα–Cα segment every ~1 Å and check against a KD-tree of buried (Other) atom positions. If any sample point is within `--probe-radius` Å of a buried atom, **reject the edge** (it cuts through the protein core).
 3. **Run Dijkstra**: Find shortest *surface-path* distance from anchor residue(s) to all other Exposed residues.
 4. **Select residues**: Keep all Exposed residues within `--surface-radius` Å of surface-path distance, plus their Supporting neighbors.
 5. **Enforce size cap** (optional): If `--max_residues` is set, automatically reduce `--surface-radius` until the selection fits.
-
-**Why it matters:** Surface pathways can avoid protein interior even when Euclidean distance is small. This ensures realistic surface adjacency for design workflows.
 
 ## Visualisation
 
@@ -184,9 +166,7 @@ Open `<stem>_annotated.pdb` in **[NanoViewer](https://nanoviewer.xyz)** or **[Mo
 
 ## How it works
 
-The pipeline consists of two modes:
-
-### Global mode (default)
+The pipeline:
 
 1. **Load structure** — Uses BioPython to load PDB or CIF format, auto-detecting the file type.
 
@@ -203,28 +183,20 @@ The pipeline consists of two modes:
    - Any residue with an atom in this radius → **Supporting**
    - Provides structural context and backbone geometry
 
-5. **Write outputs** — Generates three output files:
-   - `*_annotated.pdb` — Full structure with β-factors encoding residue class (91/81/49)
-   - `*_hotspot.pdb` — Hotspot only (Exposed + Supporting residues)
-   - `*_hotspot_residue_index.txt` — Compact residue range string (e.g., `A2-4,A53-55,...,B406-412`)
+5. **Validate anchor residues** — Check that specified anchor residues exist and are Exposed on the surface. If an anchor is Buried, the tool warns but proceeds (useful for interface analysis).
 
-### Anchor mode (`--anchor CHAIN:RESNUM`)
-
-After steps 1–4 (classification), anchor mode continues with:
-
-6. **Validate anchor residues** — Check that specified anchor residues exist and are Exposed on the surface. If an anchor is Buried, the tool warns but proceeds (useful for interface analysis).
-
-7. **Build surface graph** — Create a graph where:
+6. **Build surface graph** — Create a graph where:
    - Nodes = all Exposed residues
    - Edges connect residues whose Cα atoms are within `--graph-step` Å (default 20 Å)
    - Each edge is validated: sample the Cα–Cα segment every ~1 Å and check against a KD-tree of buried (Other) atoms. Reject edges that cut through the protein core.
 
-8. **Run Dijkstra** — Find shortest *surface-path* distance from anchor residue(s) to all other Exposed residues.
+7. **Run Dijkstra** — Find shortest *surface-path* distance from anchor residue(s) to all other Exposed residues.
 
-9. **Select by radius** — Keep all Exposed residues within `--surface-radius` Å (default 25 Å) of surface-path distance, plus their Supporting neighbors.
+8. **Select by radius** — Keep all Exposed residues within `--surface-radius` Å (default 25 Å) of surface-path distance, plus their Supporting neighbors.
 
-10. **Enforce size cap** (optional) — If `--max_residues` is set, automatically reduce `--surface-radius` until the selection fits the cap.
+9. **Enforce size cap** (optional) — If `--max_residues` is set, automatically reduce `--surface-radius` until the selection fits the cap.
 
-11. **Write outputs** — Same as step 5, but with the anchor-selected hotspot region.
-
-**Why this matters:** Surface pathways can navigate around the protein interior even when Euclidean distance is small. This ensures realistic surface adjacency for design workflows.
+10. **Write outputs** — Generates three output files:
+    - `*_annotated.pdb` — Full structure with β-factors encoding residue class (91/81/49)
+    - `*_hotspot.pdb` — Hotspot only (Exposed + Supporting residues in the selected patch)
+    - `*_hotspot_residue_index.txt` — Compact residue range string (e.g., `A2-4,A53-55,...,B406-412`)
