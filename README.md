@@ -2,11 +2,21 @@
 
 Trims protein structures to **surface hotspot regions**: exposed surface residues and the backbone-supporting residues around them.
 
-This tool is useful for:
-- **Protein design** — focus computational effort on surface-exposed hotspots
-- **Binding site analysis** — identify and visualize accessible surface patches
-- **Interface design** — select regions for mutagenesis or optimization
-- **Binder design** — scaffold generation around specific surface anchors
+<p align="center">
+  <img src="images/hotspot.png" alt="Hotspot surface patch visualization" width="500"/>
+</p>
+
+<p align="center">
+  <em>Surface patch around an anchor residue. Exposed residues (blue), Supporting residues (cyan), and buried core (orange).</em>
+</p>
+
+<p align="center">
+  <img src="images/hotpsot_annotated.png" alt="Annotated structure with color-coded residue classes" width="500"/>
+</p>
+
+<p align="center">
+  <em>Annotated PDB structure colored by residue class (β-factor). Blue = Exposed (design targets), Cyan = Supporting (backbone), Orange = Other (buried core).</em>
+</p>
 
 ## Residue classes
 
@@ -158,15 +168,7 @@ Output files:
 4. **Select residues**: Keep all Exposed residues within `--surface-radius` Å of surface-path distance, plus their Supporting neighbors.
 5. **Enforce size cap** (optional): If `--max_residues` is set, automatically reduce `--surface-radius` until the selection fits.
 
-**Why it matters:** Surface pathways can avoid protein interior even when Euclidean distance is small. This is essential for binding site analysis and binder design, where you want realistic surface adjacency.
-
-<p align="center">
-  <img src="images/hotspot.png" alt="Hotspot surface patch visualization" width="500"/>
-</p>
-
-<p align="center">
-  <em>Surface patch around an anchor residue. Exposed residues (blue), Supporting residues (cyan), and buried core (orange).</em>
-</p>
+**Why it matters:** Surface pathways can avoid protein interior even when Euclidean distance is small. This ensures realistic surface adjacency for design workflows.
 
 ## Visualisation
 
@@ -184,14 +186,6 @@ Open `<stem>_annotated.pdb` in **[NanoViewer](https://nanoviewer.xyz)** or **[Mo
 - The annotated structure shows the full protein with residue classes encoded as β-factors
 - Use the color scale to quickly identify which residues will be retained in the hotspot
 - The hotspot output (`*_hotspot.pdb`) contains only Exposed + Supporting residues
-
-<p align="center">
-  <img src="images/hotpsot_annotated.png" alt="Annotated structure with color-coded residue classes" width="500"/>
-</p>
-
-<p align="center">
-  <em>Annotated PDB structure colored by residue class (β-factor). Blue = Exposed (design targets), Cyan = Supporting (backbone), Orange = Other (buried core).</em>
-</p>
 
 ## How it works
 
