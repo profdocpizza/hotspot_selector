@@ -2,13 +2,23 @@
 
 Trims protein structures to **surface hotspot regions**: exposed surface residues and the backbone-supporting residues around them.
 
+This tool is useful for:
+- **Protein design** — focus computational effort on surface-exposed hotspots
+- **Binding site analysis** — identify and visualize accessible surface patches
+- **Interface design** — select regions for mutagenesis or optimization
+- **Binder design** — scaffold generation around specific surface anchors
+
 ## Residue classes
 
-| Class | Description | β-factor |
-|-------|-------------|----------|
-| **Exposed** | Relative SASA ≥ threshold (default 0.10) — definitively on the solvent-accessible surface | **91** |
-| **Supporting** | Any atom within 4 Å of an Exposed residue — backbone context for the hotspot | **81** |
-| **Other** | Buried interior residues | **49** |
+Hotspot Selector classifies all residues into three categories based on solvent accessibility and spatial proximity:
+
+| Class | Description | β-factor | Molecular Role |
+|-------|-------------|----------|-----------------|
+| **Exposed** | Relative SASA ≥ threshold (default 0.10) — definitively on the solvent-accessible surface | **91** | Directly accessible to solvent; primary targets for design or binding |
+| **Supporting** | Any atom within 4 Å of an Exposed residue — backbone context for the hotspot | **81** | Provide structural context and support interactions; included to preserve backbone geometry |
+| **Other** | Buried interior residues without Exposed neighbors | **49** | Buried protein core; typically unchanged in design workflows |
+
+**SASA Background:** Relative SASA (Solvent-Accessible Surface Area) is computed using the **ShrakeRupley algorithm** against empirical maximum values per residue type (Tien et al. 2013). A residue with SASA ≥ 10% of its theoretical maximum is considered Exposed.
 
 ## Outputs
 
@@ -20,54 +30,107 @@ Trims protein structures to **surface hotspot regions**: exposed surface residue
 
 ## Installation
 
+**Requirements:**
+- Python 3.8+
+- Conda or Mamba (for environment management)
+
+**Setup (first time only):**
+
 ```bash
+# Clone and navigate to the repository
+cd hotspot_selector
+
+# Create conda environment with dependencies
 conda env create -f environment.yml
 conda activate hotspot
 ```
 
-## Usage
+**Verify installation:**
 
 ```bash
-# Basic usage (PDB or CIF)
-python hotspot_selector.py structure.pdb
-python hotspot_selector.py structure.cif
+python hotspot_selector.py --help
+```
 
-# Tune thresholds
-python hotspot_selector.py structure.pdb --sasa-threshold 0.20 --support-dist 6.0
+**Troubleshooting:**
+- If `conda activate hotspot` doesn't work, try: `source activate hotspot` (for older conda versions)
+- For environment conflicts, use `mamba` instead of `conda` (faster, more reliable)
+- Note: The `examples/` directory is provided for testing only and is excluded from version control
+
+## Usage
+
+### Basic usage (minimal options)
+
+Select the entire accessible surface:
+
+```bash
+# Load a PDB file (auto-detects format)
+python hotspot_selector.py structure.pdb
+
+# Or a CIF file
+python hotspot_selector.py structure.cif
 
 # Write outputs to a specific directory
 python hotspot_selector.py structure.pdb --output-dir ./results
-
-# Anchor / surface-walk mode: select a surface patch around known residues
-python hotspot_selector.py structure.pdb --anchor A:42
-python hotspot_selector.py structure.pdb --anchor A:42 A:43 B:10 --surface-radius 30.0
-python hotspot_selector.py structure.pdb --anchor A:42 --surface-radius 30.0 --max_residues 400
 ```
 
-### Example run (2XRP, anchors E:308 and A:108)
+### Tuning sensitivity (global mode)
+
+Adjust what counts as "exposed" or "supporting":
 
 ```bash
-# Fetch 2XRP into examples/ (one-time setup)
+# Stricter Exposed threshold (10% → 20% SASA)
+python hotspot_selector.py structure.pdb --sasa-threshold 0.20
+
+# Larger Supporting shell (4 Å → 6 Å)
+python hotspot_selector.py structure.pdb --support-dist 6.0
+
+# Both together
+python hotspot_selector.py structure.pdb --sasa-threshold 0.20 --support-dist 6.0
+```
+
+### Anchor / surface-walk mode (local patches)
+
+Select a localized surface patch around one or more anchor residues:
+
+```bash
+# Single anchor
+python hotspot_selector.py structure.pdb --anchor A:42
+
+# Multiple anchors
+python hotspot_selector.py structure.pdb --anchor A:42 A:43 B:10 --surface-radius 30.0
+
+# With hotspot size cap (auto-reduces radius if needed)
+python hotspot_selector.py structure.pdb --anchor A:42 --max_residues 200
+```
+
+### Example walkthrough (2XRP from PDB)
+
+```bash
+# Create directories (first time only)
 mkdir -p examples outputs
+
+# Download a test structure from RCSB PDB
 curl -fsSL https://files.rcsb.org/download/2XRP.pdb -o examples/2XRP.pdb
 
-# Run hotspot selection around anchor residues E:308 and A:108
-python hotspot_selector.py examples/2XRP.pdb --anchor E:308 A:108 --output-dir ./outputs
+# Run hotspot selection with a single anchor (B:409)
+python hotspot_selector.py examples/2XRP.pdb --anchor B:409 --output-dir ./outputs
 
-# Inspect generated files (includes residue index .txt for easy copying)
-ls -1 ./outputs/2XRP_*
+# List outputs
+ls -lh ./outputs/2XRP_*
+
+# View the residue index (compact format for pipelines)
 cat ./outputs/2XRP_hotspot_residue_index.txt
 ```
 
-### Anchor / surface-walk mode
-
-Pass `--anchor CHAIN:RESNUM [...]` to restrict the output to a local surface patch around known residue(s).
-
-Instead of Euclidean distance (which would select residues through the protein interior), the tool builds a **surface graph** — nodes are Exposed residues, edges connect Cα atoms within `--graph-step` Å — and runs **Dijkstra** from the anchor(s). Only exposed residues within `--surface-radius` Å of *surface-path* distance are selected, along with their Supporting neighbours.
-
-**Cross-gap solvent edges** — controlled by `--graph-step`. The walk only considers edges between exposed residues whose Cα–Cα distance is within `--graph-step` (default 20 Å). Each candidate edge is validated: the Cα–Cα segment is sampled every ~1 Å and checked against a KD-tree of **buried (Other) residue atoms only** — if any sample point is within `--probe-radius` Å of a buried atom, the edge is rejected (it cuts through the protein core). Surface backbone atoms are correctly ignored. To allow hops across larger solvent gaps (cavities, clefts), simply increase `--graph-step`.
-
-If `--max_residues` is set (anchor mode), the tool evaluates the selected hotspot size (Exposed + Supporting residues) and, when needed, automatically decreases the effective `--surface-radius` until the selection is within the cap.
+**Expected output for B:409:**
+```
+Exposed residues: 64
+Supporting residues: 147
+Output files:
+  - 2XRP_annotated.pdb (2.2M) — full structure with β-factors
+  - 2XRP_hotspot.pdb (128K) — hotspot only
+  - 2XRP_hotspot_residue_index.txt → A2-3,A102-104,...,B389-431
+```
 
 ### Options
 
@@ -82,20 +145,80 @@ If `--max_residues` is set (anchor mode), the tool evaluates the selected hotspo
 | `--graph-step` | `20.0` | (Anchor mode) Max Cα–Cα for a graph edge; increase to hop across larger solvent gaps |
 | `--probe-radius` | `2.5` | (Anchor mode) Min clearance (Å) from any buried protein atom; edges cutting through buried core are rejected |
 
+### How anchor / surface-walk mode works
+
+**The Problem:** Euclidean distance selects residues through the protein interior, which is not useful for surface design. You need *surface-path* distance instead.
+
+**The Solution:** Build a surface-only graph and use Dijkstra's algorithm to find true geodesic distance on the surface.
+
+**Algorithm:**
+1. **Build surface graph**: Nodes = all Exposed residues. Edges connect residues whose Cα atoms are within `--graph-step` Å (default 20 Å).
+2. **Validate edges**: For each candidate edge, sample the Cα–Cα segment every ~1 Å and check against a KD-tree of buried (Other) atom positions. If any sample point is within `--probe-radius` Å of a buried atom, **reject the edge** (it cuts through the protein core). Backbone atoms of surface residues are correctly ignored.
+3. **Run Dijkstra**: Find shortest *surface-path* distance from anchor residue(s) to all other Exposed residues.
+4. **Select residues**: Keep all Exposed residues within `--surface-radius` Å of surface-path distance, plus their Supporting neighbors.
+5. **Enforce size cap** (optional): If `--max_residues` is set, automatically reduce `--surface-radius` until the selection fits.
+
+**Why it matters:** Surface pathways can avoid protein interior even when Euclidean distance is small. This is essential for binding site analysis and binder design, where you want realistic surface adjacency.
+
+<p align="center">
+  <img src="images/hotspot.png" alt="Hotspot surface patch visualization" width="500"/>
+</p>
+
+<p align="center">
+  <em>Surface patch around an anchor residue. Exposed residues (blue), Supporting residues (cyan), and buried core (orange).</em>
+</p>
+
 ## Visualisation
 
-Open `<stem>_annotated.pdb` in **[NanoViewer](https://nanoviewer.xyz)** or **[Mol*](https://molstar.org/viewer/)** and colour by **pLDDT / B-factor**:
+Open `<stem>_annotated.pdb` in **[NanoViewer](https://nanoviewer.xyz)** or **[Mol*](https://molstar.org/viewer/)** and colour by **pLDDT / B-factor** to see the classification:
 
-- **Blue / 91** → Exposed surface residues
-- **Cyan / 81** → Supporting residues  
-- **Orange / 49** → Other (buried) residues
+### Color mapping table
 
-This gives an immediate visual overview of which parts of the structure will be retained in the hotspot output.
+| β-factor | Class | Color | Hex Code | Meaning |
+|----------|-------|-------|----------|---------|
+| **91** | **Exposed** | <span style="color: #0066ff">■</span> Blue | `#0066ff` | Directly accessible to solvent; primary design targets |
+| **81** | **Supporting** | <span style="color: #10cff1">■</span> Cyan | `#10cff1` | Backbone context; structural support for hotspot |
+| **49** | **Other** | <span style="color: #ff8c00">■</span> Orange | `#ff8c00` | Buried protein interior; typically preserved |
+
+**Visualization tips:**
+- The annotated structure shows the full protein with residue classes encoded as β-factors
+- Use the color scale to quickly identify which residues will be retained in the hotspot
+- The hotspot output (`*_hotspot.pdb`) contains only Exposed + Supporting residues
+
+<p align="center">
+  <img src="images/hotpsot_annotated.png" alt="Annotated structure with color-coded residue classes" width="500"/>
+</p>
+
+<p align="center">
+  <em>Annotated PDB structure colored by residue class (β-factor). Blue = Exposed (design targets), Cyan = Supporting (backbone), Orange = Other (buried core).</em>
+</p>
 
 ## How it works
 
-1. Loads the structure with BioPython (auto-detects PDB vs CIF format).
-2. Runs **ShrakeRupley SASA** calculation (BioPython built-in, no external dependencies).
-3. Computes relative SASA per residue against empirical maximum values (Tien et al. 2013).
-4. Labels Exposed residues → builds a neighbour search → labels Supporting residues.
-5. Writes the two PDB outputs and a hotspot residue index `.txt` file.
+The pipeline consists of four main steps:
+
+### Step 1: Load structure
+Loads the protein structure using **BioPython**, automatically detecting PDB or CIF format.
+
+### Step 2: Compute SASA
+Runs the **ShrakeRupley solvent-accessible surface area (SASA)** algorithm, built into BioPython.
+- No external dependencies required
+- Computes atomic SASA, then aggregates to per-residue values
+- Fast (~1–2 seconds for typical structures)
+
+### Step 3: Classify residues
+Computes **relative SASA** per residue by dividing by empirical maximum values (from Tien et al. 2013):
+- Residues with relative SASA ≥ `--sasa-threshold` (default 0.10) → **Exposed**
+- All other residues → queued for Supporting check
+
+### Step 4: Find Supporting residues
+For each Exposed residue, queries all atoms within `--support-dist` Å (default 4 Å):
+- Any residue with an atom in this radius → **Supporting**
+- Provides structural context and backbone geometry
+- Preserves local geometry for design workflows
+
+### Step 5: Write outputs
+Generates three output files:
+- `*_annotated.pdb` — Full structure with β-factors encoding residue class (91/81/49)
+- `*_hotspot.pdb` — Hotspot only (Exposed + Supporting residues)
+- `*_hotspot_residue_index.txt` — Compact residue range string (e.g., `A2-4,A53-55,...,B406-412`)
